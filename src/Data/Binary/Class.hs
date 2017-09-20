@@ -5,7 +5,10 @@
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE Trustworthy #-}
 
-#if __GLASGOW_HASKELL__ >= 706
+#if __GLASGOW_HASKELL__ >= 800
+{-# LANGUAGE TypeInType #-}
+{-# LANGUAGE TypeApplications #-}
+#elif __GLASGOW_HASKELL__ >= 706
 {-# LANGUAGE PolyKinds #-}
 #endif
 
@@ -953,38 +956,43 @@ putTypeRep (Fun arg res) = do
     putTypeRep res
 putTypeRep _ = fail "GHCi.TH.Binary.putTypeRep: Impossible"
 
-getSomeTypeRep :: Get SomeTypeRep
+data GetResult where
+    GetResult :: forall (a :: k). TypeRep a -> TypeRep k -> GetResult
+
+getSomeTypeRep :: Get GetResult
 getSomeTypeRep = do
     tag <- get :: Get Word8
     case tag of
-        0 -> return $ SomeTypeRep (typeRep :: TypeRep Type)
+        0 -> return $ GetResult (typeRep @Type) (typeRep @Type)
         1 -> do con <- get :: Get TyCon
                 ks <- get :: Get [SomeTypeRep]
-                return $ SomeTypeRep $ mkTrCon con ks
-        2 -> do SomeTypeRep f <- getSomeTypeRep
-                SomeTypeRep x <- getSomeTypeRep
-                case typeRepKind f of
+                let rep = mkTrCon con ks
+                return $ GetResult rep (typeRepKind rep)
+        2 -> do GetResult f kf <- getSomeTypeRep
+                GetResult x kx <- getSomeTypeRep
+                case kf of
                   Fun arg res ->
-                      case arg `eqTypeRep` typeRepKind x of
-                        Just HRefl -> do
-                            case typeRepKind res `eqTypeRep` (typeRep :: TypeRep Type) of
-                                Just HRefl -> return $ SomeTypeRep $ mkTrApp f x
-                                _ -> failure "Kind mismatch" []
-                        _ -> failure "Kind mismatch"
-                             [ "Found argument of kind:      " ++ show (typeRepKind x)
-                             , "Where the constructor:       " ++ show f
-                             , "Expects an argument of kind: " ++ show arg
-                             ]
+                      let k_res = typeRepKind res
+                      in case arg `eqTypeRep` kx of
+                           Just HRefl -> do
+                               case k_res `eqTypeRep` typeRep @Type of
+                                   Just HRefl -> return $ GetResult (mkTrApp f x) res
+                                   _ -> failure "Kind mismatch" []
+                           _ -> failure "Kind mismatch"
+                                [ "Found argument of kind:      " ++ show kx
+                                , "Where the constructor:       " ++ show f
+                                , "Expects an argument of kind: " ++ show arg
+                                ]
                   _ -> failure "Applied non-arrow type"
                        [ "Applied type: " ++ show f
                        , "To argument:  " ++ show x
                        ]
-        3 -> do SomeTypeRep arg <- getSomeTypeRep
-                SomeTypeRep res <- getSomeTypeRep
-                case typeRepKind arg `eqTypeRep` (typeRep :: TypeRep Type) of
+        3 -> do GetResult arg k_arg <- getSomeTypeRep
+                GetResult res k_res <- getSomeTypeRep
+                case k_arg `eqTypeRep` typeRep @Type of
                   Just HRefl ->
-                      case typeRepKind res `eqTypeRep` (typeRep :: TypeRep Type) of
-                        Just HRefl -> return $ SomeTypeRep $ Fun arg res
+                      case k_res `eqTypeRep` typeRep @Type of
+                        Just HRefl -> return $ GetResult (Fun arg res) k_res
                         Nothing -> failure "Kind mismatch" []
                   Nothing -> failure "Kind mismatch" []
         _ -> failure "Invalid SomeTypeRep" []
@@ -996,7 +1004,7 @@ getSomeTypeRep = do
 instance Typeable a => Binary (TypeRep (a :: k)) where
     put = putTypeRep
     get = do
-        SomeTypeRep rep <- getSomeTypeRep
+        GetResult rep _ <- getSomeTypeRep
         case rep `eqTypeRep` expected of
           Just HRefl -> pure rep
           Nothing    -> fail $ unlines
@@ -1008,6 +1016,7 @@ instance Typeable a => Binary (TypeRep (a :: k)) where
 
 instance Binary SomeTypeRep where
     put (SomeTypeRep rep) = putTypeRep rep
-    get = getSomeTypeRep
+    get = do GetResult ty _ <- getSomeTypeRep
+             return (SomeTypeRep ty)
 #endif
 
